@@ -1,0 +1,21 @@
+{
+  "type": [
+    "null",
+    "object"
+  ],
+  "properties": {
+    "date": {
+      "type": [
+        "null",
+        "string"
+      ],
+      "format": "date-time"
+    },
+    "value": {
+      "type": [
+        "null",
+        "number"
+      ]
+    }
+  }
+}
