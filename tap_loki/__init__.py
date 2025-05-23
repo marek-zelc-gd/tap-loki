@@ -55,7 +55,7 @@ class CustomClient(Client):
         res = requests.get(self._full_url(resource), params, auth=self._auth, headers={"X-Scope-OrgID": "fake"})
         #print(res.json())
         return res.json()
-    def range_query(self, metric, start=None, end=None, step=60, params=None):
+    def range_query(self, metric, start=None, end=None, step=5, params=None):
         """
         Returns a PrometheusData object loaded with results from a query_range call
         :param metric: string of the metric query
@@ -70,6 +70,7 @@ class CustomClient(Client):
 
         params['query'] = metric
         params['step'] = step
+        params['limit'] = 10000
 
         if start is None:
             start = time_to_epoch((datetime.now() - timedelta(days=1)))
