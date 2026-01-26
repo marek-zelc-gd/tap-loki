@@ -70,7 +70,7 @@ class CustomClient(Client):
 
         params['query'] = metric
         params['step'] = step
-        params['limit'] = 10000
+        params['limit'] = 1000
 
         if start is None:
             start = time_to_epoch((datetime.now() - timedelta(days=1)))
