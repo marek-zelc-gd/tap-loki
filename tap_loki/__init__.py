@@ -70,7 +70,7 @@ class CustomClient(Client):
 
         params['query'] = metric
         params['step'] = step
-        params['limit'] = 5000
+        params['limit'] = 10000
 
         if start is None:
             start = time_to_epoch((datetime.now() - timedelta(days=1)))
@@ -251,10 +251,18 @@ def query_metric(client: CustomClient, name: str, query: str, batch: int, step: 
                 LOGGER.warn(
                     'Request %s returned an empty result for the date %s', query, iterator_unixtime)
 
-            singer.write_bookmark(
+            Context.state = singer.write_bookmark(
                 Context.state,
                 name,
                 'start_date',
+                datetime.utcfromtimestamp(
+                    next_iterator_unixtime).strftime(DATE_FORMAT)
+            )
+            # Also store the Singer SDK-style replication value for compatibility.
+            Context.state = singer.write_bookmark(
+                Context.state,
+                name,
+                'replication_key_value',
                 datetime.utcfromtimestamp(
                     next_iterator_unixtime).strftime(DATE_FORMAT)
             )
@@ -282,10 +290,37 @@ def try_parse_float(element: any):
 
 
 def get_bookmark(name):
+    # Prefer this tap's bookmark key, but also support common Singer-style
+    # replication key state from older/newer implementations.
     bookmark = singer.get_bookmark(Context.state, name, 'start_date')
+    if bookmark is None:
+        bookmark = singer.get_bookmark(Context.state, name, 'replication_key_value')
     if bookmark is None:
         bookmark = Context.config['start_date']
     return bookmark
+
+
+def normalize_state(raw_state):
+    if not isinstance(raw_state, dict):
+        LOGGER.info('State source: no valid state object provided, starting with empty state')
+        return {}
+
+    # Some orchestrators wrap Singer state under completed.singer_state.
+    completed_state = raw_state.get('completed', {})
+    if isinstance(completed_state, dict):
+        nested_singer_state = completed_state.get('singer_state')
+        if isinstance(nested_singer_state, dict):
+            LOGGER.info('State source: using wrapped Singer state from completed.singer_state')
+            return nested_singer_state
+
+    # Other wrappers may place singer_state at the top level.
+    top_level_singer_state = raw_state.get('singer_state')
+    if isinstance(top_level_singer_state, dict):
+        LOGGER.info('State source: using wrapped Singer state from top-level singer_state')
+        return top_level_singer_state
+
+    LOGGER.info('State source: using provided top-level Singer state')
+    return raw_state
 
 
 def init_prom_client():
@@ -315,7 +350,8 @@ def main():
         else:
             Context.catalog = discover()
 
-        Context.state = args.state
+        # Keep state mutable and unwrap wrapped Singer states if needed.
+        Context.state = normalize_state(args.state)
 
         client = init_prom_client()
         sync(client)
