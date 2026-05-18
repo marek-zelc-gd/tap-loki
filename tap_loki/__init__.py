@@ -280,10 +280,22 @@ def try_parse_float(element: any):
         return None
 
 
+def _unwrap_state(state):
+    # The tap emits state as a Singer STATE message ({"type": "STATE", "value": {...}}).
+    # If the state file captured the message verbatim instead of just the inner value,
+    # unwrap it so singer.get_bookmark can find the bookmarks.
+    if isinstance(state, dict) and state.get('type') == 'STATE' and isinstance(state.get('value'), dict):
+        return state['value']
+    return state or {}
+
+
 def get_bookmark(name):
     bookmark = singer.get_bookmark(Context.state, name, 'start_date')
     if bookmark is None:
         bookmark = Context.config['start_date']
+        LOGGER.info('Stream %s: no saved bookmark, using config start_date %s', name, bookmark)
+    else:
+        LOGGER.info('Stream %s: using saved bookmark %s', name, bookmark)
     return bookmark
 
 
@@ -314,7 +326,8 @@ def main():
         else:
             Context.catalog = discover()
 
-        Context.state = args.state
+        Context.state = _unwrap_state(args.state)
+        LOGGER.info('Loaded state: %s', json.dumps(Context.state))
 
         client = init_prom_client()
         sync(client)
