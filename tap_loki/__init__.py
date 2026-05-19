@@ -251,21 +251,9 @@ def query_metric(client: CustomClient, name: str, query: str, batch: int, step: 
                 LOGGER.warn(
                     'Request %s returned an empty result for the date %s', query, iterator_unixtime)
 
-            Context.state = singer.write_bookmark(
-                Context.state,
-                name,
-                'start_date',
-                datetime.utcfromtimestamp(
-                    next_iterator_unixtime).strftime(DATE_FORMAT)
-            )
-            # Also store the Singer SDK-style replication value for compatibility.
-            Context.state = singer.write_bookmark(
-                Context.state,
-                name,
-                'replication_key_value',
-                datetime.utcfromtimestamp(
-                    next_iterator_unixtime).strftime(DATE_FORMAT)
-            )
+            bookmark_value = datetime.utcfromtimestamp(
+                next_iterator_unixtime).strftime(DATE_FORMAT)
+            write_bookmark(name, bookmark_value)
 
             # write state everytime, as batches might be quite large already
             singer.write_state(Context.state)
@@ -290,17 +278,62 @@ def try_parse_float(element: any):
 
 
 def get_bookmark(name):
-    # Prefer this tap's bookmark key, but also support common Singer-style
-    # replication key state from older/newer implementations.
+    # Prefer exact stream bookmark lookup.
     bookmark = singer.get_bookmark(Context.state, name, 'start_date')
     if bookmark is None:
-        bookmark = singer.get_bookmark(Context.state, name, 'replication_key_value')
+        bookmark = singer.get_bookmark(
+            Context.state, name, 'replication_key_value')
+
+    # Fallback: some runners may alter stream keys slightly. Try normalized key match.
+    if bookmark is None and isinstance(Context.state, dict):
+        bookmarks = Context.state.get('bookmarks', {})
+        normalized_name = normalize_stream_key(name)
+        for stream_key, stream_bookmark in bookmarks.items():
+            if normalize_stream_key(stream_key) != normalized_name:
+                continue
+            if not isinstance(stream_bookmark, dict):
+                continue
+            bookmark = stream_bookmark.get('start_date') or stream_bookmark.get('replication_key_value')
+            if bookmark is not None:
+                LOGGER.info(
+                    'Bookmark lookup: stream "%s" matched state key "%s"',
+                    name,
+                    stream_key
+                )
+                break
+
     if bookmark is None:
+        LOGGER.info(
+            'Bookmark lookup: stream "%s" missing in state, falling back to config start_date',
+            name
+        )
         bookmark = Context.config['start_date']
+    else:
+        LOGGER.info('Bookmark lookup: stream "%s" using bookmark %s', name, bookmark)
+
     return bookmark
 
 
+def write_bookmark(stream_name, bookmark_value):
+    if not isinstance(Context.state, dict):
+        Context.state = {}
+
+    bookmarks = Context.state.setdefault('bookmarks', {})
+    stream_bookmark = bookmarks.setdefault(stream_name, {})
+    stream_bookmark['start_date'] = bookmark_value
+    # Keep Singer SDK compatibility key in sync.
+    stream_bookmark['replication_key_value'] = bookmark_value
+
+
 def normalize_state(raw_state):
+    if isinstance(raw_state, str):
+        try:
+            raw_state = json.loads(raw_state)
+            LOGGER.info('State source: parsed state from JSON string input')
+        except ValueError:
+            LOGGER.info('State source: invalid JSON string state, starting with empty state')
+            return {}
+
     if not isinstance(raw_state, dict):
         LOGGER.info('State source: no valid state object provided, starting with empty state')
         return {}
@@ -321,6 +354,10 @@ def normalize_state(raw_state):
 
     LOGGER.info('State source: using provided top-level Singer state')
     return raw_state
+
+
+def normalize_stream_key(stream_name):
+    return str(stream_name).replace('-', '_').replace('/', '.')
 
 
 def init_prom_client():
