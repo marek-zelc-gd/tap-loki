@@ -55,7 +55,7 @@ class CustomClient(Client):
         res = requests.get(self._full_url(resource), params, auth=self._auth, headers={"X-Scope-OrgID": "fake"})
         #print(res.json())
         return res.json()
-    def range_query(self, metric, start=None, end=None, step=60, params=None):
+    def range_query(self, metric, start=None, end=None, step=5, params=None):
         """
         Returns a PrometheusData object loaded with results from a query_range call
         :param metric: string of the metric query
@@ -70,6 +70,7 @@ class CustomClient(Client):
 
         params['query'] = metric
         params['step'] = step
+        params['limit'] = 10000
 
         if start is None:
             start = time_to_epoch((datetime.now() - timedelta(days=1)))
@@ -250,13 +251,9 @@ def query_metric(client: CustomClient, name: str, query: str, batch: int, step: 
                 LOGGER.warn(
                     'Request %s returned an empty result for the date %s', query, iterator_unixtime)
 
-            singer.write_bookmark(
-                Context.state,
-                name,
-                'start_date',
-                datetime.utcfromtimestamp(
-                    next_iterator_unixtime).strftime(DATE_FORMAT)
-            )
+            bookmark_value = datetime.utcfromtimestamp(
+                next_iterator_unixtime).strftime(DATE_FORMAT)
+            write_bookmark(name, bookmark_value)
 
             # write state everytime, as batches might be quite large already
             singer.write_state(Context.state)
@@ -290,13 +287,86 @@ def _unwrap_state(state):
 
 
 def get_bookmark(name):
+    # Prefer exact stream bookmark lookup.
     bookmark = singer.get_bookmark(Context.state, name, 'start_date')
     if bookmark is None:
+        bookmark = singer.get_bookmark(
+            Context.state, name, 'replication_key_value')
+
+    # Fallback: some runners may alter stream keys slightly. Try normalized key match.
+    if bookmark is None and isinstance(Context.state, dict):
+        bookmarks = Context.state.get('bookmarks', {})
+        normalized_name = normalize_stream_key(name)
+        for stream_key, stream_bookmark in bookmarks.items():
+            if normalize_stream_key(stream_key) != normalized_name:
+                continue
+            if not isinstance(stream_bookmark, dict):
+                continue
+            bookmark = stream_bookmark.get('start_date') or stream_bookmark.get('replication_key_value')
+            if bookmark is not None:
+                LOGGER.info(
+                    'Bookmark lookup: stream "%s" matched state key "%s"',
+                    name,
+                    stream_key
+                )
+                break
+
+    if bookmark is None:
+        LOGGER.info(
+            'Bookmark lookup: stream "%s" missing in state, falling back to config start_date',
+            name
+        )
         bookmark = Context.config['start_date']
         LOGGER.info('Stream %s: no saved bookmark, using config start_date %s', name, bookmark)
     else:
         LOGGER.info('Stream %s: using saved bookmark %s', name, bookmark)
     return bookmark
+
+
+def write_bookmark(stream_name, bookmark_value):
+    if not isinstance(Context.state, dict):
+        Context.state = {}
+
+    bookmarks = Context.state.setdefault('bookmarks', {})
+    stream_bookmark = bookmarks.setdefault(stream_name, {})
+    stream_bookmark['start_date'] = bookmark_value
+    # Keep Singer SDK compatibility key in sync.
+    stream_bookmark['replication_key_value'] = bookmark_value
+
+
+def normalize_state(raw_state):
+    if isinstance(raw_state, str):
+        try:
+            raw_state = json.loads(raw_state)
+            LOGGER.info('State source: parsed state from JSON string input')
+        except ValueError:
+            LOGGER.info('State source: invalid JSON string state, starting with empty state')
+            return {}
+
+    if not isinstance(raw_state, dict):
+        LOGGER.info('State source: no valid state object provided, starting with empty state')
+        return {}
+
+    # Some orchestrators wrap Singer state under completed.singer_state.
+    completed_state = raw_state.get('completed', {})
+    if isinstance(completed_state, dict):
+        nested_singer_state = completed_state.get('singer_state')
+        if isinstance(nested_singer_state, dict):
+            LOGGER.info('State source: using wrapped Singer state from completed.singer_state')
+            return nested_singer_state
+
+    # Other wrappers may place singer_state at the top level.
+    top_level_singer_state = raw_state.get('singer_state')
+    if isinstance(top_level_singer_state, dict):
+        LOGGER.info('State source: using wrapped Singer state from top-level singer_state')
+        return top_level_singer_state
+
+    LOGGER.info('State source: using provided top-level Singer state')
+    return raw_state
+
+
+def normalize_stream_key(stream_name):
+    return str(stream_name).replace('-', '_').replace('/', '.')
 
 
 def init_prom_client():
