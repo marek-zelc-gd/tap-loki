@@ -277,15 +277,6 @@ def try_parse_float(element: any):
         return None
 
 
-def _unwrap_state(state):
-    # The tap emits state as a Singer STATE message ({"type": "STATE", "value": {...}}).
-    # If the state file captured the message verbatim instead of just the inner value,
-    # unwrap it so singer.get_bookmark can find the bookmarks.
-    if isinstance(state, dict) and state.get('type') == 'STATE' and isinstance(state.get('value'), dict):
-        return state['value']
-    return state or {}
-
-
 def get_bookmark(name):
     # Prefer exact stream bookmark lookup.
     bookmark = singer.get_bookmark(Context.state, name, 'start_date')
@@ -347,6 +338,13 @@ def normalize_state(raw_state):
         LOGGER.info('State source: no valid state object provided, starting with empty state')
         return {}
 
+    # The tap emits state as a Singer STATE message ({"type": "STATE", "value": {...}}).
+    # If the state file captured the message verbatim instead of just the inner value,
+    # unwrap it so singer.get_bookmark can find the bookmarks.
+    if raw_state.get('type') == 'STATE' and isinstance(raw_state.get('value'), dict):
+        LOGGER.info('State source: using wrapped Singer state from STATE message envelope')
+        return raw_state['value']
+
     # Some orchestrators wrap Singer state under completed.singer_state.
     completed_state = raw_state.get('completed', {})
     if isinstance(completed_state, dict):
@@ -396,7 +394,7 @@ def main():
         else:
             Context.catalog = discover()
 
-        Context.state = _unwrap_state(args.state)
+        Context.state = normalize_state(args.state)
         LOGGER.info('Loaded state: %s', json.dumps(Context.state))
 
         client = init_prom_client()
