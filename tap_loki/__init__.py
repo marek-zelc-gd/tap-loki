@@ -311,6 +311,17 @@ def get_bookmark(name):
         LOGGER.info('Stream %s: no saved bookmark, using config start_date %s', name, bookmark)
     else:
         LOGGER.info('Stream %s: using saved bookmark %s', name, bookmark)
+
+    # Never start further back than 3 days, regardless of bookmark/start_date age.
+    bookmark_dt = datetime.strptime(bookmark, DATE_FORMAT).replace(tzinfo=timezone.utc)
+    three_days_ago = singer.utils.now() - timedelta(days=3)
+    if three_days_ago > bookmark_dt:
+        LOGGER.info(
+            'Stream %s: bookmark %s is older than 3 days, using %s instead',
+            name, bookmark, three_days_ago.strftime(DATE_FORMAT)
+        )
+        bookmark = three_days_ago.strftime(DATE_FORMAT)
+
     return bookmark
 
 
